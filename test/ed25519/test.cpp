@@ -4,6 +4,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <gmock/gmock.h>
 
 #include "../utils.hpp"
 
@@ -14,20 +15,20 @@ extern "C" {
 TEST(Ed25519, GenerateKeypair) {
   std::array<uint8_t, ED25519_KEYPAIR_LENGTH> keypair;
   std::array<uint8_t, ED25519_SEED_LENGTH> seed = {42, 1, 2, 3, 4, 5};
-  auto status = ed25519_keypair_from_seed(keypair.data(), seed.data());
-  ASSERT_EQ(status, ED25519_RESULT_OK);
+  ed25519_keypair_from_seed(keypair.data(), seed.data());
+  ASSERT_THAT(keypair, testing::Contains(testing::Not(0)));
 }
 
 TEST(Ed25519, SignVerify) {
   std::array<uint8_t, ED25519_KEYPAIR_LENGTH> keypair{};
   std::array<uint8_t, ED25519_SEED_LENGTH> seed = {42, 1, 2, 3, 4, 5};
-  auto status = ed25519_keypair_from_seed(keypair.data(), seed.data());
-  ASSERT_EQ(status, ED25519_RESULT_OK);
+  ed25519_keypair_from_seed(keypair.data(), seed.data());
+  ASSERT_THAT(keypair, testing::Contains(testing::Not(0)));
 
   std::array<uint8_t, ED25519_SIGNATURE_LENGTH> signature{};
   std::vector<uint8_t> message = {'H', 'e', 'l', 'l', 'o', ',', ' ',
                                   'w', 'o', 'r', 'l', 'd', '!', '\n'};
-  status = ed25519_sign(signature.data(), keypair.data(), message.data(),
+  auto status = ed25519_sign(signature.data(), keypair.data(), message.data(),
                         message.size());
   ASSERT_EQ(status, ED25519_RESULT_OK);
 
