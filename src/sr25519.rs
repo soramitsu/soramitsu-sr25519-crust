@@ -5,10 +5,12 @@ use std::slice;
 pub use merlin::Transcript;
 use schnorrkel::{
     context::signing_context,
-    derive::{CHAIN_CODE_LENGTH, ChainCode, Derivation}, ExpansionMode, Keypair, MiniSecretKey, PublicKey,
-    SecretKey, Signature, SignatureError, vrf::{VRFOutput, VRFProof}};
-use std::fmt::{Formatter, Error};
+    derive::{ChainCode, Derivation, CHAIN_CODE_LENGTH},
+    vrf::{VRFPreOut, VRFProof},
+    ExpansionMode, Keypair, MiniSecretKey, PublicKey, SecretKey, Signature, SignatureError,
+};
 use std::convert::TryInto;
+use std::fmt::{Error, Formatter};
 
 // cbindgen has an issue with macros, so define it outside,
 // otherwise it would've been possible to avoid duplication of macro variant list
@@ -42,7 +44,6 @@ pub enum Sr25519SignatureResult {
     /// the preceeding multi-signautre protocol stage or else duplicate
     /// duplicate records for the current stage.
     MuSigInconsistent,
-
 }
 
 /// converts from schnorrkel::SignatureError
@@ -52,12 +53,17 @@ fn convert_error(err: &SignatureError) -> Sr25519SignatureResult {
         SignatureError::EquationFalse => Sr25519SignatureResult::EquationFalse,
         SignatureError::PointDecompressionError => Sr25519SignatureResult::PointDecompressionError,
         SignatureError::ScalarFormatError => Sr25519SignatureResult::ScalarFormatError,
-        SignatureError::BytesLengthError { name: _, description: _, length: _ }
-        => Sr25519SignatureResult::BytesLengthError,
+        SignatureError::BytesLengthError {
+            name: _,
+            description: _,
+            length: _,
+        } => Sr25519SignatureResult::BytesLengthError,
         SignatureError::MuSigAbsent { musig_stage: _ } => Sr25519SignatureResult::MuSigAbsent,
-        SignatureError::MuSigInconsistent { musig_stage: _, duplicate: _ }
-        => Sr25519SignatureResult::MuSigInconsistent,
-        SignatureError::NotMarkedSchnorrkel => Sr25519SignatureResult::NotMarkedSchnorrkel
+        SignatureError::MuSigInconsistent {
+            musig_stage: _,
+            duplicate: _,
+        } => Sr25519SignatureResult::MuSigInconsistent,
+        SignatureError::NotMarkedSchnorrkel => Sr25519SignatureResult::NotMarkedSchnorrkel,
     }
 }
 
@@ -86,7 +92,7 @@ fn create_from_seed(seed: &[u8]) -> Keypair {
 fn create_from_pair(pair: &[u8]) -> Keypair {
     match Keypair::from_bytes(pair) {
         Ok(pair) => return pair,
-        Err(_) => panic!(format!("Provided pair is invalid: {:?}", pair)),
+        Err(_) => panic!("Provided pair is invalid: {:?}", pair),
     }
 }
 
@@ -157,7 +163,11 @@ pub unsafe extern "C" fn sr25519_derive_keypair_hard(
         .0
         .expand_to_keypair(ExpansionMode::Ed25519);
 
-    ptr::copy(kp.to_bytes().as_ptr(), keypair_out, SR25519_KEYPAIR_SIZE as usize);
+    ptr::copy(
+        kp.to_bytes().as_ptr(),
+        keypair_out,
+        SR25519_KEYPAIR_SIZE as usize,
+    );
 }
 
 /// Perform a derivation on a secret
@@ -179,7 +189,11 @@ pub unsafe extern "C" fn sr25519_derive_keypair_soft(
         .derived_key_simple(create_cc(cc), &[])
         .0;
 
-    ptr::copy(kp.to_bytes().as_ptr(), keypair_out, SR25519_KEYPAIR_SIZE as usize);
+    ptr::copy(
+        kp.to_bytes().as_ptr(),
+        keypair_out,
+        SR25519_KEYPAIR_SIZE as usize,
+    );
 }
 
 /// Perform a derivation on a publicKey
@@ -200,7 +214,11 @@ pub unsafe extern "C" fn sr25519_derive_public_soft(
     let p = create_public(public)
         .derived_key_simple(create_cc(cc), &[])
         .0;
-    ptr::copy(p.to_bytes().as_ptr(), pubkey_out, SR25519_PUBLIC_SIZE as usize);
+    ptr::copy(
+        p.to_bytes().as_ptr(),
+        pubkey_out,
+        SR25519_PUBLIC_SIZE as usize,
+    );
 }
 
 /// Generate a key pair.
@@ -213,7 +231,11 @@ pub unsafe extern "C" fn sr25519_derive_public_soft(
 pub unsafe extern "C" fn sr25519_keypair_from_seed(keypair_out: *mut u8, seed_ptr: *const u8) {
     let seed = slice::from_raw_parts(seed_ptr, SR25519_SEED_SIZE as usize);
     let kp = create_from_seed(seed);
-    ptr::copy(kp.to_bytes().as_ptr(), keypair_out, SR25519_KEYPAIR_SIZE as usize);
+    ptr::copy(
+        kp.to_bytes().as_ptr(),
+        keypair_out,
+        SR25519_KEYPAIR_SIZE as usize,
+    );
 }
 
 /// Sign a message
@@ -264,16 +286,19 @@ pub unsafe extern "C" fn sr25519_verify(
     message_ptr: *const u8,
     message_length: c_ulong,
     public_ptr: *const u8,
-) -> bool {
+) -> Sr25519SignatureResult {
     let public = slice::from_raw_parts(public_ptr, SR25519_PUBLIC_SIZE as usize);
     let signature = slice::from_raw_parts(signature_ptr, SR25519_SIGNATURE_SIZE as usize);
     let message = slice::from_raw_parts(message_ptr, message_length as usize);
     let signature = match Signature::from_bytes(signature) {
         Ok(signature) => signature,
-        Err(_) => return false,
+        Err(e) => return convert_error(&e),
     };
 
-    create_public(public).verify_simple(SIGNING_CTX, message, &signature).is_ok()
+    match create_public(public).verify_simple(SIGNING_CTX, message, &signature) {
+        Ok(()) => Sr25519SignatureResult::Ok,
+        Err(e) => convert_error(&e),
+    }
 }
 
 #[repr(C)]
@@ -287,11 +312,17 @@ pub struct VrfResult {
 
 impl VrfResult {
     fn create_err(err: &SignatureError) -> VrfResult {
-        VrfResult { is_less: false, result: convert_error(&err) }
+        VrfResult {
+            is_less: false,
+            result: convert_error(&err),
+        }
     }
 
     fn create_val(is_less: bool) -> VrfResult {
-        VrfResult { is_less, result: Sr25519SignatureResult::Ok }
+        VrfResult {
+            is_less,
+            result: Sr25519SignatureResult::Ok,
+        }
     }
 }
 
@@ -330,16 +361,23 @@ pub unsafe extern "C" fn sr25519_vrf_sign_if_less(
     let mut limit_arr: [u8; SR25519_VRF_THRESHOLD_SIZE as usize] = Default::default();
     limit_arr.copy_from_slice(&limit[0..SR25519_VRF_THRESHOLD_SIZE as usize]);
 
-    let (io, proof, _) =
-        keypair.vrf_sign(
-            signing_context(SIGNING_CTX).bytes(message));
+    let (io, proof, _) = keypair.vrf_sign(signing_context(SIGNING_CTX).bytes(message));
     let limit_int = u128::from_le_bytes(limit_arr);
 
-    let raw_out_bytes = io.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
+    let raw_out_bytes =
+        io.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
     let check = u128::from_le_bytes(raw_out_bytes) < limit_int;
 
-    ptr::copy(io.to_output().as_bytes().as_ptr(), out_and_proof_ptr, SR25519_VRF_OUTPUT_SIZE as usize);
-    ptr::copy(proof.to_bytes().as_ptr(), out_and_proof_ptr.add(SR25519_VRF_OUTPUT_SIZE as usize), SR25519_VRF_PROOF_SIZE as usize);
+    ptr::copy(
+        io.as_output_bytes().as_ptr(),
+        out_and_proof_ptr,
+        SR25519_VRF_OUTPUT_SIZE as usize,
+    );
+    ptr::copy(
+        proof.to_bytes().as_ptr(),
+        out_and_proof_ptr.add(SR25519_VRF_OUTPUT_SIZE as usize),
+        SR25519_VRF_PROOF_SIZE as usize,
+    );
 
     VrfResult::create_val(check)
 }
@@ -362,42 +400,52 @@ pub unsafe extern "C" fn sr25519_vrf_verify(
     proof_ptr: *const u8,
     threshold_ptr: *const u8,
 ) -> VrfResult {
-    let public_key = create_public(slice::from_raw_parts(public_key_ptr, SR25519_PUBLIC_SIZE as usize));
+    let public_key = create_public(slice::from_raw_parts(
+        public_key_ptr,
+        SR25519_PUBLIC_SIZE as usize,
+    ));
     let message = slice::from_raw_parts(message_ptr, message_length as usize);
     let ctx = signing_context(SIGNING_CTX).bytes(message);
-    let given_out = match VRFOutput::from_bytes(
-        slice::from_raw_parts(output_ptr, SR25519_VRF_OUTPUT_SIZE as usize)) {
+    let given_out = match VRFPreOut::from_bytes(slice::from_raw_parts(
+        output_ptr,
+        SR25519_VRF_OUTPUT_SIZE as usize,
+    )) {
         Ok(val) => val,
-        Err(err) => return VrfResult::create_err(&err)
+        Err(err) => return VrfResult::create_err(&err),
     };
-    let given_proof = match VRFProof::from_bytes(
-        slice::from_raw_parts(proof_ptr, SR25519_VRF_PROOF_SIZE as usize)) {
+    let given_proof = match VRFProof::from_bytes(slice::from_raw_parts(
+        proof_ptr,
+        SR25519_VRF_PROOF_SIZE as usize,
+    )) {
         Ok(val) => val,
-        Err(err) => return VrfResult::create_err(&err)
+        Err(err) => return VrfResult::create_err(&err),
     };
-    let (in_out, proof) =
-        match public_key.vrf_verify(ctx.clone(), &given_out, &given_proof) {
-            Ok(val) => val,
-            Err(err) => return VrfResult::create_err(&err)
-        };
-    let raw_output = in_out.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
+    let (in_out, proof) = match public_key.vrf_verify(ctx.clone(), &given_out, &given_proof) {
+        Ok(val) => val,
+        Err(err) => return VrfResult::create_err(&err),
+    };
+    let raw_output =
+        in_out.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
 
     let threshold = slice::from_raw_parts(threshold_ptr, SR25519_VRF_THRESHOLD_SIZE as usize);
     let threshold_arr: [u8; SR25519_VRF_THRESHOLD_SIZE as usize] = match threshold.try_into() {
         Ok(val) => val,
-        Err(err) => return VrfResult { result: Sr25519SignatureResult::BytesLengthError, is_less: false }
+        Err(err) => {
+            return VrfResult {
+                result: Sr25519SignatureResult::BytesLengthError,
+                is_less: false,
+            }
+        }
     };
     let threshold_int = u128::from_le_bytes(threshold_arr);
 
     let check = u128::from_le_bytes(raw_output) < threshold_int;
 
-    let decomp_proof = match
-    proof.shorten_vrf(&public_key, ctx.clone(), &in_out.to_output()) {
+    let decomp_proof = match proof.shorten_vrf(&public_key, ctx.clone(), &in_out.to_preout()) {
         Ok(val) => val,
-        Err(e) => return VrfResult::create_err(&e)
+        Err(e) => return VrfResult::create_err(&e),
     };
-    if in_out.to_output() == given_out &&
-        decomp_proof == given_proof {
+    if in_out.as_output_bytes() == given_out.as_bytes() && decomp_proof == given_proof {
         VrfResult::create_val(check)
     } else {
         VrfResult::create_err(&SignatureError::EquationFalse)
@@ -440,15 +488,23 @@ pub unsafe extern "C" fn sr25519_vrf_sign_transcript(
 
     let transcript = std::mem::transmute::<*const Strobe128, &mut Transcript>(transcript_data);
 
-    let (io, proof, _) =
-        keypair.vrf_sign(transcript);
+    let (io, proof, _) = keypair.vrf_sign(transcript);
     let limit_int = u128::from_le_bytes(limit_arr);
 
-    let raw_out_bytes = io.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
+    let raw_out_bytes =
+        io.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
     let check = u128::from_le_bytes(raw_out_bytes) < limit_int;
 
-    ptr::copy(io.to_output().as_bytes().as_ptr(), out_and_proof_ptr, SR25519_VRF_OUTPUT_SIZE as usize);
-    ptr::copy(proof.to_bytes().as_ptr(), out_and_proof_ptr.add(SR25519_VRF_OUTPUT_SIZE as usize), SR25519_VRF_PROOF_SIZE as usize);
+    ptr::copy(
+        io.to_preout().as_bytes().as_ptr(),
+        out_and_proof_ptr,
+        SR25519_VRF_OUTPUT_SIZE as usize,
+    );
+    ptr::copy(
+        proof.to_bytes().as_ptr(),
+        out_and_proof_ptr.add(SR25519_VRF_OUTPUT_SIZE as usize),
+        SR25519_VRF_PROOF_SIZE as usize,
+    );
 
     VrfResult::create_val(check)
 }
@@ -471,36 +527,47 @@ pub unsafe extern "C" fn sr25519_vrf_verify_transcript(
     proof_ptr: *const u8,
     threshold_ptr: *const u8,
 ) -> VrfResult {
-    let public_key = create_public(slice::from_raw_parts(public_key_ptr, SR25519_PUBLIC_SIZE as usize));
+    let public_key = create_public(slice::from_raw_parts(
+        public_key_ptr,
+        SR25519_PUBLIC_SIZE as usize,
+    ));
     let transcript = std::mem::transmute::<*const Strobe128, &mut Transcript>(transcript_data);
-    let given_out = match VRFOutput::from_bytes(
-        slice::from_raw_parts(output_ptr, SR25519_VRF_OUTPUT_SIZE as usize)) {
+    let given_out = match VRFPreOut::from_bytes(slice::from_raw_parts(
+        output_ptr,
+        SR25519_VRF_OUTPUT_SIZE as usize,
+    )) {
         Ok(val) => val,
-        Err(err) => return VrfResult::create_err(&err)
+        Err(err) => return VrfResult::create_err(&err),
     };
-    let given_proof = match VRFProof::from_bytes(
-        slice::from_raw_parts(proof_ptr, SR25519_VRF_PROOF_SIZE as usize)) {
+    let given_proof = match VRFProof::from_bytes(slice::from_raw_parts(
+        proof_ptr,
+        SR25519_VRF_PROOF_SIZE as usize,
+    )) {
         Ok(val) => val,
-        Err(err) => return VrfResult::create_err(&err)
+        Err(err) => return VrfResult::create_err(&err),
     };
-    let (in_out, _) =
-        match public_key.vrf_verify(transcript, &given_out, &given_proof) {
-            Ok(val) => val,
-            Err(err) => return VrfResult::create_err(&err)
-        };
-    let raw_output = in_out.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
+    let (in_out, _) = match public_key.vrf_verify(transcript, &given_out, &given_proof) {
+        Ok(val) => val,
+        Err(err) => return VrfResult::create_err(&err),
+    };
+    let raw_output =
+        in_out.make_bytes::<[u8; SR25519_VRF_RAW_OUTPUT_SIZE as usize]>(BABE_VRF_PREFIX);
 
     let threshold = slice::from_raw_parts(threshold_ptr, SR25519_VRF_THRESHOLD_SIZE as usize);
     let threshold_arr: [u8; SR25519_VRF_THRESHOLD_SIZE as usize] = match threshold.try_into() {
         Ok(val) => val,
-        Err(err) => return VrfResult { result: Sr25519SignatureResult::BytesLengthError, is_less: false }
+        Err(err) => {
+            return VrfResult {
+                result: Sr25519SignatureResult::BytesLengthError,
+                is_less: false,
+            }
+        }
     };
     let threshold_int = u128::from_le_bytes(threshold_arr);
 
     let check = u128::from_le_bytes(raw_output) < threshold_int;
     VrfResult::create_val(check)
 }
-
 
 #[cfg(test)]
 pub mod tests {
@@ -574,7 +641,7 @@ pub mod tests {
                 message.len() as c_ulong,
             )
         };
-        let is_valid = unsafe {
+        let res = unsafe {
             sr25519_verify(
                 signature.as_ptr(),
                 message.as_ptr(),
@@ -583,7 +650,7 @@ pub mod tests {
             )
         };
 
-        assert!(is_valid);
+        assert!(res == Sr25519SignatureResult::Ok);
     }
 
     #[test]
@@ -642,17 +709,25 @@ pub mod tests {
 
         let ctx = signing_context(SIGNING_CTX).bytes(message);
         let (io, proof, _) = keypair.vrf_sign(ctx.clone());
-        let (io_, proof_) = keypair.public.vrf_verify(ctx.clone(), &io.to_output(), &proof).expect("Verification error");
+        let (io_, proof_) = keypair
+            .public
+            .vrf_verify(ctx.clone(), &io.to_preout(), &proof)
+            .expect("Verification error");
         assert_eq!(io_, io);
-        let decomp_proof = proof_.shorten_vrf(
-            &keypair.public, ctx.clone(), &io.to_output()).expect("Shorten VRF");
+        let decomp_proof = proof_
+            .shorten_vrf(&keypair.public, ctx.clone(), &io.to_preout())
+            .expect("Shorten VRF");
         assert_eq!(proof, decomp_proof);
         unsafe {
             let threshold_bytes = [0u8; SR25519_VRF_THRESHOLD_SIZE as usize];
-            let res = sr25519_vrf_verify(keypair.public.as_ref().as_ptr(),
-                                         message.as_ptr(), message.len() as c_ulong,
-                                         io.as_output_bytes().as_ptr(),
-                                         proof.to_bytes().as_ptr(), threshold_bytes.as_ptr());
+            let res = sr25519_vrf_verify(
+                keypair.public.as_ref().as_ptr(),
+                message.as_ptr(),
+                message.len() as c_ulong,
+                io.as_output_bytes().as_ptr(),
+                proof.to_bytes().as_ptr(),
+                threshold_bytes.as_ptr(),
+            );
             assert_eq!(res.result, Sr25519SignatureResult::Ok);
         }
     }
@@ -664,17 +739,40 @@ pub mod tests {
 
         let mut ctx = signing_context(SIGNING_CTX).bytes(message);
         let (io, proof, _) = keypair.vrf_sign(ctx.clone());
-        let (io_, proof_) = keypair.public.vrf_verify(ctx.clone(), &io.to_output(), &proof).expect("Verification error");
+        let (io_, proof_) = keypair
+            .public
+            .vrf_verify(ctx.clone(), &io.to_preout(), &proof)
+            .expect("Verification error");
         assert_eq!(io_, io);
-        let decomp_proof = proof_.shorten_vrf(
-            &keypair.public, ctx.clone(), &io.to_output()).expect("Shorten VRF");
+        let decomp_proof = proof_
+            .shorten_vrf(&keypair.public, ctx.clone(), &io.to_preout())
+            .expect("Shorten VRF");
         assert_eq!(proof, decomp_proof);
         unsafe {
             let threshold_bytes = [0u8; SR25519_VRF_THRESHOLD_SIZE as usize];
-            let res = sr25519_vrf_verify_transcript(keypair.public.as_ref().as_ptr(),
-                                                    std::mem::transmute::<&mut Transcript, *const Strobe128>(&mut ctx), io.as_output_bytes().as_ptr(),
-                                                    proof.to_bytes().as_ptr(), threshold_bytes.as_ptr());
+            let res = sr25519_vrf_verify_transcript(
+                keypair.public.as_ref().as_ptr(),
+                std::mem::transmute::<&mut Transcript, *const Strobe128>(&mut ctx),
+                io.as_output_bytes().as_ptr(),
+                proof.to_bytes().as_ptr(),
+                threshold_bytes.as_ptr(),
+            );
             assert_eq!(res.result, Sr25519SignatureResult::Ok);
         }
+    }
+
+    #[test]
+    fn tmp() {
+        let sig = hex!("4a87a7d3673e5c80aec79973682140828a0d1c3899f4f3cc953bd02673e11a022aaa4f269e3f1a90156db29df88f780b1540b610aeb5cd347ee703c5dff48485");
+        let msg = hex!("492068657265627920616772656520746f20746865207465726d73206f66207468652073746174656d656e742077686f7365205348412d323536206d756c74696861736820697320516d63315859715436533339574e70325565695255725a6963685557555070474554684445366441623366364e792e202854686973206d617920626520666f756e64206174207468652055524c3a2068747470733a2f2f73746174656d656e742e706f6c6b61646f742e6e6574776f726b2f726567756c61722e68746d6c29");
+        let pubkey = hex!("0cf4da8aea0e5649a8bedbc1f08e8a8c0febe50cd5b1c9ce0da2164f19aef40f");
+        
+        let signing_public_key = schnorrkel::PublicKey::from_bytes(&pubkey).unwrap();
+        // TODO: copy overhead?
+        let signature = schnorrkel::Signature::from_bytes(&sig).unwrap();
+
+        let res = signing_public_key
+            .verify_simple(b"substrate", &msg, &signature);
+        assert_eq!(res, Ok(()));
     }
 }
